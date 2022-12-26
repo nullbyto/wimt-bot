@@ -1,0 +1,1 @@
+pub const USER_DATA_PATH: &str = "./userdata.json";
