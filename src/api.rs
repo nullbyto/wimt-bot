@@ -100,7 +100,7 @@ pub async fn get_departures(
 ) -> Result<Vec<BusDeparture>, Box<dyn Error + Send + Sync>> {
     let url = format!(
         "https://v5.db.transport.rest/stops/{}/departures",
-        // "https://v5.db.transport.rest/stops/{}/departures?when=today 9am",
+        // "https://v5.db.transport.rest/stops/{}/departures?when=today 9am", // for debugging
         stop_id
     );
 

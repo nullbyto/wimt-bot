@@ -343,7 +343,7 @@ async fn receive_stop(
             .map(|x| x.name.as_str())
             .collect::<Vec<&str>>();
 
-        let kb = make_inline_keyboard(departures_names.clone(), 3);
+        let mut dep_names: Vec<String> = vec![];
 
         // Format departure info
         let mut departure_info = String::new();
@@ -353,19 +353,24 @@ async fn receive_stop(
                 .time()
                 .format("%H:%M");
             departure_info = format!(
-                "{}\n--------------------\n{}, <b>to</b> {} <b>on</b> {}\n--------------------",
+                "{}\n--------------------\n{}, <b>to</b> {} <b>on</b> {}",
                 departure_info,
                 dep.name,
                 dep.direction,
                 time
             );
+
+            // Add direction to departure names for buttons
+            let bus_name = format!("{} ({})", dep.name, dep.direction);
+            dep_names.push(bus_name);
         }
+        let kb = make_inline_keyboard(dep_names.iter().map(|x| x.as_ref()).collect(), 2);
 
         // Output departure info
         bot.send_message(
             dialogue.chat_id(),
             format!(
-                "🚏 Infos for selected station: <b>{}</b>\n{}",
+                "🚏 Infos for selected station: <b>{}</b>\n{}\n--------------------",
                 stop, departure_info
             ),
         ).parse_mode(Html)
@@ -419,8 +424,16 @@ async fn receive_bus(
 
                 // Fetch the list of departuring buses from the stop (station)
                 let deps = get_departures(stop_id.clone()).await?;
-                // Get the departure of selected bus the user has selected
-                let dep = deps.iter().find(|&x| &x.name == &bus_clone.to_owned()).unwrap();
+                // Get the departure of selected bus considering direction the user has selected
+                let dep = deps.iter().find(|&x| {
+                    // Extract name and direction from button to compare bus departures
+                    let first_parent = bus_clone.find("(").unwrap();
+                    let last_parent = bus_clone.len();
+                    let direction = bus_clone[first_parent+1..last_parent-1].to_string();
+                    let bus_name = bus_clone[0..first_parent-1].to_string();
+
+                    &x.name == &bus_name && &x.direction == &direction
+                }).unwrap();
                 
                 // Parse planned departure time
                 let mut dep_time = DateTime::parse_from_rfc3339(&dep.planned).unwrap();
@@ -464,7 +477,7 @@ async fn receive_bus(
                     .await?;
                 } else {
                     msg = bot.send_message(dial.chat_id(), 
-                        format!("🔔 Your bus: <b>{}</b> 🚌 comes in <b>{}</b> minutes ⌛!", &bus_clone, dur.num_minutes())
+                        format!("🔔 Your bus: <b>{}</b> 🚌 arrives in <b>{}</b> minutes ⌛!", &bus_clone, dur.num_minutes())
                     )
                     .parse_mode(Html)
                     .reply_markup(kb)
@@ -548,7 +561,7 @@ fn make_inline_keyboard(list: Vec<&str>, chunks: usize) -> InlineKeyboardMarkup 
     for values in list.chunks(chunks) {
         let row = values
             .iter()
-            .map(|&version| InlineKeyboardButton::callback(version.to_owned(), version.to_owned()))
+            .map(|&value| InlineKeyboardButton::callback(value.to_owned(), value.to_owned()))
             .collect();
 
         keyboard.push(row);
