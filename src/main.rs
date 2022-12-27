@@ -294,9 +294,7 @@ Here are the nearby bus stations:",
             .parse_mode(MarkdownV2)
             .reply_markup(kb)
             .await?;
-            // bot.send_message(msg.chat.id, format!("{:?}", stations_names))
-            //     .reply_markup(kb)
-            //     .await?;
+
             dialogue
                 .update(State::ReceiveStop {
                     city,
@@ -356,12 +354,10 @@ async fn receive_stop(
         // Format departure info
         let mut departure_info = String::new();
         for dep in departures.iter() {
-            // println!("{}", dep.planned);
             let time = chrono::DateTime::parse_from_rfc3339(&dep.planned)
                 .unwrap()
                 .time()
                 .format("%H:%M");
-                // - q.message.clone().unwrap().date.time();
             departure_info = format!(
                 "{}\n--------------------\n{}, <b>to</b> {} <b>on</b> {}\n--------------------",
                 departure_info,
@@ -435,15 +431,12 @@ async fn receive_bus(
                     dep_time += Duration::seconds(del);
                 }
                 
-                // println!("dep: {}\ntime_now: {}", dep_time, time_now);
-
                 if time_now > dep_time {
                     break;
                 }
 
                 let kb = make_inline_keyboard(vec!["<< Cancel"], 1);
 
-                // println!("{:?}", msg.as_ref().unwrap().id.0);
                 bot.delete_message(dial.chat_id(), msg.id)
                     .await?;
 
