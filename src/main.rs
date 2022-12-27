@@ -67,14 +67,7 @@ enum State {
         stop: String,
         stop_id: String,
     },
-    ReceiveCancel {
-        city: String,
-        addr: String,
-        stations: Vec<Station>,
-        stop: String,
-        stop_id: String,
-        bus: String
-    },
+    ReceiveCancel
 }
 
 #[tokio::main]
@@ -118,14 +111,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .endpoint(receive_bus),
         )
         .branch(
-            case![State::ReceiveCancel {
-                city,
-                addr,
-                stations,
-                stop,
-                stop_id,
-                bus
-            }]
+            case![State::ReceiveCancel]
             .endpoint(receive_cancel)
         );
 
@@ -151,6 +137,9 @@ async fn help(bot: Bot, msg: Message) -> HandlerResult {
     Ok(())
 }
 
+//////////////////////////////////////////////////////////
+// State handlers
+//////////////////////////////////////////////////////////
 async fn invalid_state(bot: Bot, msg: Message) -> HandlerResult {
     bot.send_message(
         msg.chat.id,
@@ -160,11 +149,16 @@ async fn invalid_state(bot: Bot, msg: Message) -> HandlerResult {
     Ok(())
 }
 
-//////////////////////////////////////////////////////////
-// State handlers
-//////////////////////////////////////////////////////////
-async fn cancel(bot: Bot, dialogue: MyDialogue, msg: Message) -> HandlerResult {
-    bot.send_message(msg.chat.id, "🚫 Cancelling the tracking!")
+async fn cancel(bot: Bot, dialogue: MyDialogue, msg: Message, tasks: MyTasksMap) -> HandlerResult {
+    let user = get_user_id(&msg);
+    {
+        let mut t = tasks.lock().unwrap();
+        if let Some(v) = t.get(&user) {
+            v.abort();
+            t.remove(&user);
+        }
+    }
+    bot.send_message(msg.chat.id, "🚫 Cancelled! You can start over using /start.")
         .await?;
     dialogue.exit().await?;
     Ok(())
@@ -400,57 +394,91 @@ async fn receive_stop(
 async fn receive_bus(
     bot: Bot,
     dialogue: MyDialogue,
-    (city, addr, stations, stop, stop_id): (String, String, Vec<Station>, String, String),
+    (_city, _addr, _stations, stop, stop_id): (String, String, Vec<Station>, String, String),
     q: CallbackQuery,
     tasks: MyTasksMap,
 ) -> HandlerResult {
     if let Some(bus) = &q.data {
         let dial = dialogue.clone();
-        let n = 1;
+        // Time between each tracking update
+        let update_time = 1;
         let msg_clone = q.message.clone().unwrap();
         let mut msg = msg_clone.clone();
-        let stop_clone = stop.clone();
-        let bus_clone = bus.clone();
-        let stop_id_clone= stop_id.clone();
+        let mut loc_msg: Option<Message> = None;
 
-        let mut time_now = msg.date.clone() - Duration::minutes(n);
-        let mut interval_timer = tokio::time::interval(Duration::minutes(n).to_std().unwrap());
+        let bus_clone = bus.clone();
+
+        let mut time_now = msg.date.clone() - Duration::minutes(update_time);
+        let mut interval_timer = tokio::time::interval(Duration::minutes(update_time).to_std().unwrap());
 
         let task: JoinHandle<HandlerResult> = tokio::spawn( async move {
             loop {
                 interval_timer.tick().await;
-                time_now += Duration::minutes(n);
+                // Add the difference to the time that passed since timer's tick
+                time_now += Duration::minutes(update_time);
 
+                // Fetch the list of departuring buses from the stop (station)
                 let deps = get_departures(stop_id.clone()).await?;
+                // Get the departure of selected bus the user has selected
                 let dep = deps.iter().find(|&x| &x.name == &bus_clone.to_owned()).unwrap();
                 
+                // Parse planned departure time
                 let mut dep_time = DateTime::parse_from_rfc3339(&dep.planned).unwrap();
-                let dur = dep_time.signed_duration_since(time_now);
 
+                // Add the delay if exists
                 if let Some(del) = dep.delay {
                     dep_time += Duration::seconds(del);
                 }
+                // Calculate duration till departure
+                let dur = dep_time.signed_duration_since(time_now);
                 
+                // Stop if bus already departured
                 if time_now > dep_time {
                     break;
                 }
 
                 let kb = make_inline_keyboard(vec!["<< Cancel"], 1);
 
+                // Delete last message including the msg of the update coming from the previous iteration
                 bot.delete_message(dial.chat_id(), msg.id)
                     .await?;
 
-                msg = bot.send_message(dial.chat_id(), 
-                    format!("🔔 Your bus: <b>{}</b> 🚌 comes in <b>{}</b> minutes ⌛!", &bus_clone, dur.num_minutes())
-                )
-                .parse_mode(Html)
-                .reply_markup(kb)
-                .await?;
+                // Delete location message if it exists
+                if let Some(m) = &loc_msg {
+                    bot.delete_message(dial.chat_id(), m.id)
+                    .await?;
+                }
+
+                // Send location of bus if current position information is provided
+                if let Some(pos) = &dep.curr_position {
+                    loc_msg = Some(bot.send_location(dial.chat_id(), pos.lat.parse::<f64>().unwrap(), pos.lon.parse::<f64>().unwrap())
+                        .await?);
+                }
+
+                if dur.num_minutes() == 0 {
+                    msg = bot.send_message(dial.chat_id(), 
+                        format!("🔔 Your bus: <b>{}</b> 🚌 should arrive now!", &bus_clone)
+                    )
+                    .parse_mode(Html)
+                    .reply_markup(kb.clone())
+                    .await?;
+                } else {
+                    msg = bot.send_message(dial.chat_id(), 
+                        format!("🔔 Your bus: <b>{}</b> 🚌 comes in <b>{}</b> minutes ⌛!", &bus_clone, dur.num_minutes())
+                    )
+                    .parse_mode(Html)
+                    .reply_markup(kb)
+                    .await?;
+                }
             }
+
+            // Delete last update message
+            bot.delete_message(dial.chat_id(), msg.id)
+                .await?;
 
             bot.send_message(
                 dial.chat_id(),
-                format!("🔔 Your bus: *{}* 🚌 already departured from *{}*\\!", bus_clone, stop),
+                format!("🔔 Your bus: *{}* 🚌 is departuring from *{}*\\!", bus_clone, stop),
             ).parse_mode(MarkdownV2)
             .await?;
 
@@ -458,13 +486,17 @@ async fn receive_bus(
             return Ok(());
         });
 
+        // Insert Task-handle in the HashMap with the associated user
+        // Msg could be put in the hashmap, to edit from the cancel fn
         {
             let mut t = tasks.lock().unwrap();
-            let user = get_user_id(msg_clone);
+            let user = q.from.id.to_string();
             t.insert(user, task);
         }
 
-        dialogue.update(State::ReceiveCancel { city, addr, stations, stop: stop_clone, stop_id: stop_id_clone, bus: bus.to_string()}).await?;
+        dialogue
+            .update(State::ReceiveCancel)
+            .await?;
     }
     Ok(())
 }
@@ -472,24 +504,29 @@ async fn receive_bus(
 async fn receive_cancel(
     bot: Bot,
     dialogue: MyDialogue,
-    (_city, _addr, _stations, _stop, _stop_id, _bus): (String, String, Vec<Station>, String, String, String),
     q: CallbackQuery,
     tasks: MyTasksMap
 ) -> HandlerResult {
-    if let Some(d) = &q.data {
-        if d.starts_with("<<") {
-            let user = get_user_id(q.message.unwrap());
-            let t = tasks.lock().unwrap();
-            let v = t.get(&user).unwrap();
+    let user = q.from.id.to_string();
+    {
+        let mut t = tasks.lock().unwrap();
+        if let Some(v) = t.get(&user) {
             v.abort();
+            t.remove(&user);
         }
-        bot.send_message(dialogue.chat_id(), "🚫 Cancelled! You can start over using /start!").await?;
-        dialogue.exit().await?;
     }
+    let null_kb = InlineKeyboardMarkup::default();
+    bot.edit_message_reply_markup(dialogue.chat_id(), q.message.as_ref().unwrap().id)
+        .reply_markup(null_kb)
+        .await?;
+
+    bot.send_message(dialogue.chat_id(), "🚫 Cancelled! You can start over using /start!")
+    .await?;
+    dialogue.exit().await?;
     Ok(())
 }
 
-fn get_user_id(msg: Message) -> String{
+fn get_user_id(msg: &Message) -> String{
     let user_id = match &msg.kind {
         MessageKind::Common(MessageCommon {
              from, ..
