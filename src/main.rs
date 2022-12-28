@@ -23,7 +23,7 @@ use teloxide::{
     prelude::*,
     types::{
         InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, KeyboardMarkup, KeyboardRemove,
-        ParseMode::{Html, MarkdownV2},
+        ParseMode::{Html},
         ReplyMarkup, MessageCommon, MessageKind,
     },
     utils::command::BotCommands,
@@ -60,7 +60,7 @@ enum State {
         addr: String,
         stations: Vec<Station>,
     },
-    ReceiveBus {
+    ReceiveTransit {
         city: String,
         addr: String,
         stations: Vec<Station>,
@@ -101,14 +101,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .endpoint(receive_stop),
         )
         .branch(
-            case![State::ReceiveBus {
+            case![State::ReceiveTransit {
                 city,
                 addr,
                 stations,
                 stop,
                 stop_id,
             }]
-            .endpoint(receive_bus),
+            .endpoint(receive_transit),
         )
         .branch(
             case![State::ReceiveCancel]
@@ -191,13 +191,13 @@ async fn start(bot: Bot, dialogue: MyDialogue, msg: Message) -> HandlerResult {
             bot.send_message(
                 msg.chat.id,
                 format!(
-                    "I found your last used address: \n*{}, {} 📍*\n
-Now please select which bus station you want to track 👀\\.\n
-Here are the nearby bus stations:",
+                    "I found your last used address: \n<b>{}, {} 📍</b>\n
+Now please select which transit station you want to track 👀.\n
+Here are the nearby transit stations:",
                     data.addr, data.city
                 ),
             )
-            .parse_mode(MarkdownV2)
+            .parse_mode(Html)
             .reply_markup(kb)
             .await?;
             dialogue.update(State::ReceiveStop { city: data.city, addr: data.addr, stations }).await?
@@ -221,8 +221,8 @@ async fn receive_city(bot: Bot, dialogue: MyDialogue, msg: Message) -> HandlerRe
         Some(city) => {
             bot.send_message(
                 msg.chat.id,
-                format!("Awesome so you live in *{}* 🏙\\!\n\nWhat is your locations *address* so i can search for nearby transit stops?", city),
-            ).parse_mode(MarkdownV2)
+                format!("Awesome so you live in <b>{}</b> 🏙!\n\nWhat is your locations *address* so i can search for nearby transit stops?", city),
+            ).parse_mode(Html)
             .await?;
             dialogue.update(State::ReceiveAddress { city }).await?;
         }
@@ -279,13 +279,13 @@ async fn receive_address(
             bot.send_message(
                 msg.chat.id,
                 format!(
-                    "Thank you\\! So your address is: \n*{}, {} 📍*\n\n
-Now please select which bus station you want to track 👀\\.\n
-Here are the nearby bus stations:",
+                    "Thank you! So your address is: \n<b>{}, {} 📍</b>\n\n
+Now please select which transit station you want to track 👀.\n
+Here are the nearby transit stations:",
                     addr, city
                 ),
             )
-            .parse_mode(MarkdownV2)
+            .parse_mode(Html)
             .reply_markup(kb)
             .await?;
 
@@ -338,10 +338,10 @@ async fn receive_stop(
             .to_owned();
         let departures = get_departures(stop_id.clone()).await?;
 
-        let departures_names = departures
-            .iter()
-            .map(|x| x.name.as_str())
-            .collect::<Vec<&str>>();
+        // let departures_names = departures
+        //     .iter()
+        //     .map(|x| x.name.as_str())
+        //     .collect::<Vec<&str>>();
 
         let mut dep_names: Vec<String> = vec![];
 
@@ -361,8 +361,8 @@ async fn receive_stop(
             );
 
             // Add direction to departure names for buttons
-            let bus_name = format!("{} ({})", dep.name, dep.direction);
-            dep_names.push(bus_name);
+            let dep_name = format!("{} ({})", dep.name, dep.direction);
+            dep_names.push(dep_name);
         }
         let kb = make_inline_keyboard(dep_names.iter().map(|x| x.as_ref()).collect(), 2);
 
@@ -376,14 +376,13 @@ async fn receive_stop(
         ).parse_mode(Html)
         .await?;
 
-        // Send buttons for the bus departures
-        bot.send_message(dialogue.chat_id(), "Select a bus:")
-            .parse_mode(MarkdownV2)
+        // Send buttons for the transit departures
+        bot.send_message(dialogue.chat_id(), "Select a transit:")
             .reply_markup(kb)
             .await?;
 
         dialogue
-            .update(State::ReceiveBus {
+            .update(State::ReceiveTransit {
                 city,
                 addr,
                 stations,
@@ -396,24 +395,24 @@ async fn receive_stop(
 }
 
 
-async fn receive_bus(
+async fn receive_transit(
     bot: Bot,
     dialogue: MyDialogue,
     (_city, _addr, _stations, stop, stop_id): (String, String, Vec<Station>, String, String),
     q: CallbackQuery,
     tasks: MyTasksMap,
 ) -> HandlerResult {
-    if let Some(bus) = &q.data {
+    if let Some(transit) = &q.data {
         let dial = dialogue.clone();
         // Time between each tracking update
         let update_time = 1;
-        let msg_clone = q.message.clone().unwrap();
-        let mut msg = msg_clone.clone();
+        let msg = q.message.clone().unwrap();
+        let mut msg_clone = msg.clone();
         let mut loc_msg: Option<Message> = None;
 
-        let bus_clone = bus.clone();
+        let transit_clone = transit.clone();
 
-        let mut time_now = msg.date.clone() - Duration::minutes(update_time);
+        let mut time_now = msg_clone.date.clone() - Duration::minutes(update_time);
         let mut interval_timer = tokio::time::interval(Duration::minutes(update_time).to_std().unwrap());
 
         let task: JoinHandle<HandlerResult> = tokio::spawn( async move {
@@ -422,18 +421,22 @@ async fn receive_bus(
                 // Add the difference to the time that passed since timer's tick
                 time_now += Duration::minutes(update_time);
 
-                // Fetch the list of departuring buses from the stop (station)
+                // Fetch the list of departuring transits from the stop (station)
                 let deps = get_departures(stop_id.clone()).await?;
-                // Get the departure of selected bus considering direction the user has selected
-                let dep = deps.iter().find(|&x| {
-                    // Extract name and direction from button to compare bus departures
-                    let first_parent = bus_clone.find("(").unwrap();
-                    let last_parent = bus_clone.len();
-                    let direction = bus_clone[first_parent+1..last_parent-1].to_string();
-                    let bus_name = bus_clone[0..first_parent-1].to_string();
+                // Get the departure of selected transit considering direction the user has selected
+                let dep = match deps.iter().find(|&x| {
+                    // Extract name and direction from button to compare transit departures
+                    let first_parent = transit_clone.find("(").unwrap();
+                    let last_parent = transit_clone.len();
+                    let direction = transit_clone[first_parent+1..last_parent-1].to_string();
+                    let transit_name = transit_clone[0..first_parent-1].to_string();
 
-                    &x.name == &bus_name && &x.direction == &direction
-                }).unwrap();
+                    &x.name == &transit_name && &x.direction == &direction
+                }) {
+                    Some(d) => d,
+                    None => {break}
+
+                };
                 
                 // Parse planned departure time
                 let mut dep_time = DateTime::parse_from_rfc3339(&dep.planned).unwrap();
@@ -445,7 +448,7 @@ async fn receive_bus(
                 // Calculate duration till departure
                 let dur = dep_time.signed_duration_since(time_now);
                 
-                // Stop if bus already departured
+                // Stop if transit already departured
                 if time_now > dep_time {
                     break;
                 }
@@ -453,7 +456,7 @@ async fn receive_bus(
                 let kb = make_inline_keyboard(vec!["<< Cancel"], 1);
 
                 // Delete last message including the msg of the update coming from the previous iteration
-                bot.delete_message(dial.chat_id(), msg.id)
+                bot.delete_message(dial.chat_id(), msg_clone.id)
                     .await?;
 
                 // Delete location message if it exists
@@ -462,22 +465,23 @@ async fn receive_bus(
                     .await?;
                 }
 
-                // Send location of bus if current position information is provided
+                // Send location of transit if current position information is provided
                 if let Some(pos) = &dep.curr_position {
+                    // unwrap() since Location.lat is a string that contains always a number
                     loc_msg = Some(bot.send_location(dial.chat_id(), pos.lat.parse::<f64>().unwrap(), pos.lon.parse::<f64>().unwrap())
                         .await?);
                 }
 
                 if dur.num_minutes() == 0 {
-                    msg = bot.send_message(dial.chat_id(), 
-                        format!("🔔 Your bus: <b>{}</b> 🚌 should arrive now!", &bus_clone)
+                    msg_clone = bot.send_message(dial.chat_id(), 
+                        format!("🔔 Your transit: <b>{}</b> 🚌 should arrive now!", &transit_clone)
                     )
                     .parse_mode(Html)
                     .reply_markup(kb.clone())
                     .await?;
                 } else {
-                    msg = bot.send_message(dial.chat_id(), 
-                        format!("🔔 Your bus: <b>{}</b> 🚌 arrives in <b>{}</b> minutes ⌛!", &bus_clone, dur.num_minutes())
+                    msg_clone = bot.send_message(dial.chat_id(), 
+                        format!("🔔 Your transit: <b>{}</b> 🚌 arrives in <b>{}</b> minutes ⌛!", &transit_clone, dur.num_minutes())
                     )
                     .parse_mode(Html)
                     .reply_markup(kb)
@@ -486,13 +490,13 @@ async fn receive_bus(
             }
 
             // Delete last update message
-            bot.delete_message(dial.chat_id(), msg.id)
+            bot.delete_message(dial.chat_id(), msg_clone.id)
                 .await?;
-
+            
             bot.send_message(
                 dial.chat_id(),
-                format!("🔔 Your bus: *{}* 🚌 is departuring from *{}*\\!", bus_clone, stop),
-            ).parse_mode(MarkdownV2)
+                format!("🔔 Your transit: <b>{}</b> 🚌 is departuring from <b>{}</b>!", transit_clone, stop),
+            ).parse_mode(Html)
             .await?;
 
             dial.exit().await?;

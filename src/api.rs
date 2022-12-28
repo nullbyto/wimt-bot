@@ -97,7 +97,7 @@ pub async fn get_nearby_stations(
 
 pub async fn get_departures(
     stop_id: String,
-) -> Result<Vec<BusDeparture>, Box<dyn Error + Send + Sync>> {
+) -> Result<Vec<TransitDeparture>, Box<dyn Error + Send + Sync>> {
     let url = format!(
         "https://v5.db.transport.rest/stops/{}/departures",
         // "https://v5.db.transport.rest/stops/{}/departures?when=today 9am", // for debugging
@@ -126,9 +126,9 @@ pub async fn get_departures(
         i += 1;
     }
 
-    let mut buses: Vec<BusDeparture> = vec![];
+    let mut transits: Vec<TransitDeparture> = vec![];
     for d in departures_values.iter() {
-        let bus_name = d
+        let transit_name = d
             .get("line")
             .unwrap()
             .get("name")
@@ -136,14 +136,14 @@ pub async fn get_departures(
             .as_str()
             .unwrap()
             .to_string();
-        let bus_planned = d.get("plannedWhen").unwrap().as_str().unwrap().to_string();
-        let bus_delay = match d.get("delay") {
+        let transit_planned = d.get("plannedWhen").unwrap().as_str().unwrap().to_string();
+        let transit_delay = match d.get("delay") {
             Some(i) => i.as_i64(),
             None => None,
         };
-        let bus_direction = d.get("direction").unwrap().as_str().unwrap().to_string();
+        let transit_direction = d.get("direction").unwrap().as_str().unwrap().to_string();
 
-        let bus_destination = Station {
+        let transit_destination = Station {
             id: d
                 .get("destination")
                 .unwrap()
@@ -185,7 +185,7 @@ pub async fn get_departures(
             distance: -1, // -1 means undefined
         };
 
-        let bus_curr_position = match d.get("currentTripPosition") {
+        let transit_curr_position = match d.get("currentTripPosition") {
             Some(v) => Some(Location {
                 lat: v.get("latitude").unwrap().as_f64().unwrap().to_string(),
                 lon: v.get("longitude").unwrap().as_f64().unwrap().to_string(),
@@ -193,16 +193,16 @@ pub async fn get_departures(
             None => None,
         };
 
-        let bus = BusDeparture {
+        let transit = TransitDeparture {
             stop_id: stop_id.clone(),
-            planned: bus_planned,
-            delay: bus_delay,
-            direction: bus_direction,
-            name: bus_name,
-            destination: bus_destination,
-            curr_position: bus_curr_position,
+            planned: transit_planned,
+            delay: transit_delay,
+            direction: transit_direction,
+            name: transit_name,
+            destination: transit_destination,
+            curr_position: transit_curr_position,
         };
-        buses.push(bus);
+        transits.push(transit);
     }
-    Ok(buses)
+    Ok(transits)
 }

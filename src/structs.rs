@@ -24,7 +24,7 @@ pub struct Location {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct BusDeparture {
+pub struct TransitDeparture {
     pub stop_id: String,
     pub planned: String,
     pub delay: Option<i64>,
