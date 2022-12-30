@@ -23,7 +23,7 @@ use teloxide::{
     prelude::*,
     types::{
         InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, KeyboardMarkup, KeyboardRemove,
-        ParseMode::{Html},
+        ParseMode::Html,
         ReplyMarkup, MessageCommon, MessageKind,
     },
     utils::command::BotCommands,
@@ -320,7 +320,8 @@ async fn receive_stop(
         let null_kb = InlineKeyboardMarkup::default();
 
         if stop.starts_with("<<") {
-            bot.edit_message_text(chat_id, message_id, "Ok, Send me the new 'address'.")
+            bot.edit_message_text(chat_id, message_id, "Ok, send me the new <b>address</b>.")
+                .parse_mode(Html)
                 .reply_markup(null_kb.clone()).await?;
             dialogue.update(State::ReceiveAddress { city: city.clone() }).await?
         };
@@ -336,12 +337,19 @@ async fn receive_stop(
             .unwrap()
             .id
             .to_owned();
-        let departures = get_departures(stop_id.clone()).await?;
 
-        // let departures_names = departures
-        //     .iter()
-        //     .map(|x| x.name.as_str())
-        //     .collect::<Vec<&str>>();
+        // let departures = get_departures(stop_id.clone()).await?;
+        let departures: Vec<TransitDeparture> = vec![];
+        
+        if departures.len() == 0 {
+            bot.send_message(
+                dialogue.chat_id(),
+                format!("😟 Unfortunately, no transit departures were found from this station at this time. Please /start over!")
+            ).await?;
+
+            dialogue.exit().await?;
+            return Ok(());
+        }
 
         let mut dep_names: Vec<String> = vec![];
 
@@ -423,6 +431,7 @@ async fn receive_transit(
 
                 // Fetch the list of departuring transits from the stop (station)
                 let deps = get_departures(stop_id.clone()).await?;
+
                 // Get the departure of selected transit considering direction the user has selected
                 let dep = match deps.iter().find(|&x| {
                     // Extract name and direction from button to compare transit departures
@@ -607,5 +616,3 @@ fn _make_reply_keyboard() -> ReplyMarkup {
     }
     ReplyMarkup::keyboard(keyboard)
 }
-
-
