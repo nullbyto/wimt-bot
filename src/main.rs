@@ -338,8 +338,7 @@ async fn receive_stop(
             .id
             .to_owned();
 
-        // let departures = get_departures(stop_id.clone()).await?;
-        let departures: Vec<TransitDeparture> = vec![];
+        let departures = get_departures(stop_id.clone()).await?;
         
         if departures.len() == 0 {
             bot.send_message(
