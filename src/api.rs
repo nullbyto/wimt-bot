@@ -1,9 +1,9 @@
 use crate::structs::*;
 
-use reqwest::header::{ACCEPT, CONTENT_TYPE, USER_AGENT};
 use std::{
     error::Error
 };
+use reqwest::header::{ACCEPT, CONTENT_TYPE, USER_AGENT};
 
 //////////////////////////////////////////////////////////
 // API calls
@@ -12,8 +12,10 @@ pub async fn fetch_geocode(
     addr: String,
     city: String,
 ) -> Result<(String, String), Box<dyn Error + Send + Sync>> {
+    let api_token = std::env::var("LOCATIONIQ_TOKEN").expect("LOCATIONIQ_TOKEN must be set.");
+
     let url =
-        format!("https://nominatim.openstreetmap.org/search?street={addr}&city={city}&format=json");
+        format!("https://eu1.locationiq.com/v1/search?key={}&q={}, {}&format=json", api_token, addr, city);
 
     let client = reqwest::Client::new();
     let resp = client
@@ -27,30 +29,17 @@ pub async fn fetch_geocode(
         .await?;
 
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(&resp) {
-        let lat = match json[0].get("lat") {
-            Some(v) => v,
-            None => &serde_json::Value::Null,
-        };
-        let lon = match json[0].get("lon") {
-            Some(v) => v,
-            None => &serde_json::Value::Null,
-        };
-        let lat = match lat.as_str() {
-            Some(n) => n.to_owned(),
-            None => "0".to_owned(),
-        };
-        let lon = match lon.as_str() {
-            Some(n) => n.to_owned(),
-            None => "0".to_owned(),
-        };
-        return Ok((lat, lon));
+        let lat = &json[0]["lat"].as_str().unwrap();
+        let lon = &json[0]["lon"].as_str().unwrap();
+        return Ok((lat.to_string(), lon.to_string()));
     }
     Err("Fetching geocode!")?
 }
 
 pub async fn fetch_address(lat: String, lon: String) -> Result<String, Box<dyn Error + Send + Sync>> {
+    let api_token = std::env::var("LOCATIONIQ_TOKEN").expect("LOCATIONIQ_TOKEN must be set.");
     let url =
-        format!("https://nominatim.openstreetmap.org/reverse?lat={lat}&lon={lon}&format=json");
+        format!("https://eu1.locationiq.com/v1/reverse?key={}&lat={}&lon={}&format=json", api_token, lat, lon);
 
     let client = reqwest::Client::new();
     let resp = client
@@ -65,19 +54,13 @@ pub async fn fetch_address(lat: String, lon: String) -> Result<String, Box<dyn E
 
     let json: serde_json::Value = serde_json::from_str(&resp).unwrap();
 
-    let addr_obj = json.get("address").unwrap();
-    let house_number = addr_obj.get("house_number");
-    let street = addr_obj.get("road").unwrap();
-
-    let res;
-    match house_number {
-        Some(n) => {
-            res = format!("{} {}", street.as_str().unwrap(), n.as_str().unwrap());
-        },
-        None => {
-            res = format!("{}", street.as_str().unwrap());
-        }
-    }
+    let street = json["address"]["road"].as_str().unwrap();
+    let mut res = format!("{}", street);
+    if let Some(house_number) = json["address"]["house_number"].as_str() {
+        res = format!("{} {}", res, house_number);
+    };
+    let _city = json["address"]["city"].as_str().unwrap();
+    
     Ok(res)
 }
 
@@ -85,7 +68,7 @@ pub async fn get_nearby_stations(
     lat: String,
     lon: String,
 ) -> Result<Vec<Station>, Box<dyn Error + Send + Sync>> {
-    let url = format!("https://v5.db.transport.rest/stops/nearby?latitude={lat}&longitude={lon}");
+    let url = format!("https://v5.db.transport.rest/stops/nearby?latitude={}&longitude={}", lat, lon);
 
     let mut stations_value: Vec<serde_json::Value> = vec![];
 

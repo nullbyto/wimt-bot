@@ -1,5 +1,4 @@
 pub mod api;
-pub mod config;
 pub mod io;
 pub mod structs;
 #[cfg(test)]
@@ -19,6 +18,7 @@ use std::{
     sync::{Arc, Mutex},
     vec,
 };
+use dotenv::dotenv;
 use dptree::{case, deps};
 use teloxide::{
     dispatching::{dialogue, dialogue::InMemStorage},
@@ -87,7 +87,9 @@ enum State {
 async fn main() -> Result<(), Box<dyn Error>> {
     pretty_env_logger::init();
     log::info!("Starting 'Where is my transit' BOT ...");
-
+    
+    // Load env variables
+    dotenv().ok();
     let bot = Bot::from_env();
 
     let command_handler = filter_command::<Command, _>()
