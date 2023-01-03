@@ -250,7 +250,9 @@ async fn receive_city(bot: Bot, dialogue: MyDialogue, msg: Message) -> HandlerRe
         Some(city) => {
             bot.send_message(
                 msg.chat.id,
-                format!("Awesome so you live in <b>{}</b> 🏙!\n\nWhat is your locations *address* so i can search for nearby transit stops?", city),
+                format!("Awesome so you live in <b>{}</b> 🏙!
+\n\nWhat is your locations <b>street address</b> so i can search for nearby transit stops?
+You can also send me a <b>location</b> 📍 instead!", city),
             ).parse_mode(Html)
             .await?;
             dialogue.update(State::ReceiveAddress { city }).await?;
@@ -272,66 +274,78 @@ async fn receive_address(
     msg: Message,
     city: String,
 ) -> HandlerResult {
-    match msg.text().map(ToOwned::to_owned) {
-        Some(addr) => {
-            // Store info of user for next time
-            let user_id = match &msg.kind {
-                MessageKind::Common(MessageCommon { from, .. }) => Some(from.as_ref().unwrap().id),
-                _ => None,
-            };
+    let location = msg.location();
+    let address = msg.text().map(ToOwned::to_owned);
+    if location.is_none() && address.is_none() {
+        bot.send_message(
+            msg.chat.id,
+            "❌ Please, send me your address, so i can start tracking.",
+        )
+        .await?;
+        return Ok(());
+    }
+    let addr;
 
-            let UserId(id_num) = user_id.unwrap();
+    // Store info of user for next time
+    let user_id = match &msg.kind {
+        MessageKind::Common(MessageCommon { from, .. }) => Some(from.as_ref().unwrap().id),
+        _ => None,
+    };
 
-            let geocode = fetch_geocode(addr.clone(), city.clone()).await?;
-            let stations = get_nearby_stations(geocode.0.clone(), geocode.1.clone()).await?;
-            let mut stations_names = stations
-                .iter()
-                .map(|x| x.name.as_str())
-                .collect::<Vec<&str>>();
+    let UserId(id_num) = user_id.unwrap();
 
-            let user_data = UserData {
-                id: id_num.to_string(),
-                city: city.clone(),
-                addr: addr.clone(),
-                lat: geocode.0,
-                lon: geocode.1,
-            };
-            store_user_data(user_data).unwrap();
+    // Get geocode if location was sent instead of an address
+    let geocode = match location {
+        Some(loc) => {
+            addr = fetch_address(loc.latitude.to_string(), loc.longitude.to_string()).await?;
+            (loc.latitude.to_string(), loc.longitude.to_string())
+        },
+        None => {
+            addr = address.unwrap();
+            fetch_geocode(addr.clone(), city.clone()).await?
+        }
+    };
 
-            let mut kb_buttons: Vec<&str> = vec![];
-            kb_buttons.append(&mut stations_names);
-            kb_buttons.push("<< Change address");
+    let stations = get_nearby_stations(geocode.0.clone(), geocode.1.clone()).await?;
+    let mut stations_names = stations
+        .iter()
+        .map(|x| x.name.as_str())
+        .collect::<Vec<&str>>();
 
-            let kb = make_inline_keyboard(kb_buttons, 2);
-            bot.send_message(
-                msg.chat.id,
-                format!(
-                    "Thank you! So your address is: \n<b>{}, {} 📍</b>\n\n
+    let user_data = UserData {
+        id: id_num.to_string(),
+        city: city.clone(),
+        addr: addr.clone(),
+        lat: geocode.0,
+        lon: geocode.1,
+    };
+    store_user_data(user_data).unwrap();
+
+    let mut kb_buttons: Vec<&str> = vec![];
+    kb_buttons.append(&mut stations_names);
+    kb_buttons.push("<< Change address");
+
+    let kb = make_inline_keyboard(kb_buttons, 2);
+    bot.send_message(
+        msg.chat.id,
+        format!(
+            "Thank you! So your address is: \n<b>{}, {} 📍</b>\n\n
 Now please select which transit station you want to track 👀.\n
 Here are the nearby transit stations:",
-                    addr, city
-                ),
-            )
-            .parse_mode(Html)
-            .reply_markup(kb)
-            .await?;
+            addr, city
+        ),
+    )
+    .parse_mode(Html)
+    .reply_markup(kb)
+    .await?;
 
-            dialogue
-                .update(State::ReceiveStop {
-                    city,
-                    addr,
-                    stations,
-                })
-                .await?;
-        }
-        None => {
-            bot.send_message(
-                msg.chat.id,
-                "❌ Please, send me your city that you live in, so i can start tracking.",
-            )
-            .await?;
-        }
-    }
+    dialogue
+        .update(State::ReceiveStop {
+            city,
+            addr,
+            stations,
+        })
+        .await?;
     Ok(())
 }
 
@@ -347,13 +361,15 @@ async fn receive_stop(
         let null_kb = InlineKeyboardMarkup::default();
 
         if stop.starts_with("<<") {
-            bot.edit_message_text(chat_id, message_id, "Ok, send me the new <b>address</b>.")
+            bot.edit_message_text(chat_id, message_id, "Ok, send me the new <b>street address</b> or a <b>location</b> 📍.")
                 .parse_mode(Html)
                 .reply_markup(null_kb.clone())
                 .await?;
             dialogue
                 .update(State::ReceiveAddress { city: city.clone() })
-                .await?
+                .await?;
+            
+            return Ok(());
         };
 
         // Remove buttons from last send msg

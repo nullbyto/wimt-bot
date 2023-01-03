@@ -48,6 +48,39 @@ pub async fn fetch_geocode(
     Err("Fetching geocode!")?
 }
 
+pub async fn fetch_address(lat: String, lon: String) -> Result<String, Box<dyn Error + Send + Sync>> {
+    let url =
+        format!("https://nominatim.openstreetmap.org/reverse?lat={lat}&lon={lon}&format=json");
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(url)
+        .header(CONTENT_TYPE, "application/json")
+        .header(ACCEPT, "application/json")
+        .header(USER_AGENT, "reqwest/0.11.13")
+        .send()
+        .await?
+        .text()
+        .await?;
+
+    let json: serde_json::Value = serde_json::from_str(&resp).unwrap();
+
+    let addr_obj = json.get("address").unwrap();
+    let house_number = addr_obj.get("house_number");
+    let street = addr_obj.get("road").unwrap();
+
+    let res;
+    match house_number {
+        Some(n) => {
+            res = format!("{} {}", street.as_str().unwrap(), n.as_str().unwrap());
+        },
+        None => {
+            res = format!("{}", street.as_str().unwrap());
+        }
+    }
+    Ok(res)
+}
+
 pub async fn get_nearby_stations(
     lat: String,
     lon: String,
