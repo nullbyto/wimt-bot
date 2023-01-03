@@ -1,20 +1,25 @@
-pub mod structs;
 pub mod api;
-pub mod io;
 pub mod config;
+pub mod io;
+pub mod structs;
 #[cfg(test)]
 mod tests;
 
-use chrono::{DateTime, Duration};
-use structs::*;
 use api::*;
+use chrono::{DateTime, Duration};
 use io::*;
+use structs::*;
 
-use dptree::{case, deps};
-use tokio::{
-    task::JoinHandle,
+use std::{
+    collections::HashMap,
+    error::Error,
+    fs::File,
+    io::Read,
+    path::Path,
+    sync::{Arc, Mutex},
+    vec,
 };
-use std::{error::Error, vec, path::Path, fs::File, io::Read, sync::{Mutex, Arc}, collections::HashMap};
+use dptree::{case, deps};
 use teloxide::{
     dispatching::{dialogue, dialogue::InMemStorage},
     dptree::endpoint,
@@ -23,11 +28,11 @@ use teloxide::{
     prelude::*,
     types::{
         InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, KeyboardMarkup, KeyboardRemove,
-        ParseMode::Html,
-        ReplyMarkup, MessageCommon, MessageKind,
+        MessageCommon, MessageKind, ParseMode::Html, ReplyMarkup,
     },
     utils::command::BotCommands,
 };
+use tokio::task::JoinHandle;
 
 type HandlerResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 type MyDialogue = Dialogue<State, InMemStorage<State>>;
@@ -36,7 +41,7 @@ type MyTasksMap = Arc<Mutex<HashMap<String, JoinHandle<HandlerResult>>>>;
 #[derive(BotCommands, Clone)]
 #[command(
     rename_rule = "lowercase",
-    description = "These commands are supported:"
+    description = "I track your transit in your area and send you notifications with current location.\nThese commands are supported:"
 )]
 enum Command {
     #[command(description = "Display help menu showing the commands list")]
@@ -67,7 +72,15 @@ enum State {
         stop: String,
         stop_id: String,
     },
-    ReceiveCancel
+    ReceiveMinutes {
+        city: String,
+        addr: String,
+        stations: Vec<Station>,
+        stop: String,
+        stop_id: String,
+        transit: String,
+    },
+    ReceiveCancel,
 }
 
 #[tokio::main]
@@ -90,7 +103,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .branch(case![State::ReceiveCity].endpoint(receive_city))
         .branch(case![State::ReceiveAddress { city }].endpoint(receive_address))
         .branch(endpoint(invalid_state));
-    
+
     let callback_query_handler = Update::filter_callback_query()
         .branch(
             case![State::ReceiveStop {
@@ -111,16 +124,25 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .endpoint(receive_transit),
         )
         .branch(
-            case![State::ReceiveCancel]
-            .endpoint(receive_cancel)
-        );
+            case![State::ReceiveMinutes {
+                city,
+                addr,
+                stations,
+                stop,
+                stop_id,
+                transit,
+            }]
+            .endpoint(receive_minutes),
+        )
+        .branch(case![State::ReceiveCancel].endpoint(receive_cancel));
 
     let dial = dialogue::enter::<Update, InMemStorage<State>, State, _>()
         .branch(message_handler)
         .branch(callback_query_handler);
-    
+
     // Shared HashMap of JoinHandles of tasks to be able to cancel the timer.
-    let tasks: Arc<Mutex<HashMap<String, JoinHandle<HandlerResult>>>> = Arc::new(Mutex::new(HashMap::new()));
+    let tasks: Arc<Mutex<HashMap<String, JoinHandle<HandlerResult>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
 
     Dispatcher::builder(bot, dial)
         .dependencies(deps![InMemStorage::<State>::new(), tasks])
@@ -158,20 +180,21 @@ async fn cancel(bot: Bot, dialogue: MyDialogue, msg: Message, tasks: MyTasksMap)
             t.remove(&user);
         }
     }
-    bot.send_message(msg.chat.id, "🚫 Cancelled! You can start over using /start.")
-        .await?;
+    bot.send_message(
+        msg.chat.id,
+        "🚫 Cancelled! You can start over using /start.",
+    )
+    .await?;
     dialogue.exit().await?;
     Ok(())
 }
 
 async fn start(bot: Bot, dialogue: MyDialogue, msg: Message) -> HandlerResult {
     let user_id = match &msg.kind {
-        MessageKind::Common(MessageCommon {
-             from, ..
-            }) => {Some(from.as_ref().unwrap().id)}
-        _ => {None}
+        MessageKind::Common(MessageCommon { from, .. }) => Some(from.as_ref().unwrap().id),
+        _ => None,
     };
-    
+
     let UserId(id_num) = user_id.unwrap();
     match get_user_data(id_num.to_string()) {
         Ok(data) => {
@@ -184,7 +207,7 @@ async fn start(bot: Bot, dialogue: MyDialogue, msg: Message) -> HandlerResult {
             let mut kb_buttons: Vec<&str> = vec![];
             kb_buttons.append(&mut stations_names);
             kb_buttons.push("<< Change address");
-            
+
             let kb = make_inline_keyboard(kb_buttons, 2);
             // Parse station names as keyboard buttons
             // let kb = make_inline_keyboard(stations_names.clone(), 2);
@@ -200,7 +223,13 @@ Here are the nearby transit stations:",
             .parse_mode(Html)
             .reply_markup(kb)
             .await?;
-            dialogue.update(State::ReceiveStop { city: data.city, addr: data.addr, stations }).await?
+            dialogue
+                .update(State::ReceiveStop {
+                    city: data.city,
+                    addr: data.addr,
+                    stations,
+                })
+                .await?
         }
         Err(_) => {
             bot.send_message(
@@ -247,12 +276,10 @@ async fn receive_address(
         Some(addr) => {
             // Store info of user for next time
             let user_id = match &msg.kind {
-                MessageKind::Common(MessageCommon {
-                    from, ..
-                    }) => {Some(from.as_ref().unwrap().id)}
-                _ => {None}
+                MessageKind::Common(MessageCommon { from, .. }) => Some(from.as_ref().unwrap().id),
+                _ => None,
             };
- 
+
             let UserId(id_num) = user_id.unwrap();
 
             let geocode = fetch_geocode(addr.clone(), city.clone()).await?;
@@ -267,14 +294,14 @@ async fn receive_address(
                 city: city.clone(),
                 addr: addr.clone(),
                 lat: geocode.0,
-                lon: geocode.1
+                lon: geocode.1,
             };
             store_user_data(user_data).unwrap();
 
             let mut kb_buttons: Vec<&str> = vec![];
             kb_buttons.append(&mut stations_names);
             kb_buttons.push("<< Change address");
-            
+
             let kb = make_inline_keyboard(kb_buttons, 2);
             bot.send_message(
                 msg.chat.id,
@@ -322,8 +349,11 @@ async fn receive_stop(
         if stop.starts_with("<<") {
             bot.edit_message_text(chat_id, message_id, "Ok, send me the new <b>address</b>.")
                 .parse_mode(Html)
-                .reply_markup(null_kb.clone()).await?;
-            dialogue.update(State::ReceiveAddress { city: city.clone() }).await?
+                .reply_markup(null_kb.clone())
+                .await?;
+            dialogue
+                .update(State::ReceiveAddress { city: city.clone() })
+                .await?
         };
 
         // Remove buttons from last send msg
@@ -339,7 +369,7 @@ async fn receive_stop(
             .to_owned();
 
         let departures = get_departures(stop_id.clone()).await?;
-        
+
         if departures.len() == 0 {
             bot.send_message(
                 dialogue.chat_id(),
@@ -359,12 +389,22 @@ async fn receive_stop(
                 .unwrap()
                 .time()
                 .format("%H:%M");
+
+            // Add delay in minutes between parenthesis in the infos (+delay)
+            let delay = match dep.delay {
+                None => format!(""),
+                Some(del) => {
+                    if del == 0 {
+                        format!("")
+                    } else {
+                        format!(" (+{})", del / 60)
+                    }
+                }
+            };
+
             departure_info = format!(
-                "{}\n--------------------\n{}, <b>to</b> {} <b>on</b> {}",
-                departure_info,
-                dep.name,
-                dep.direction,
-                time
+                "{}\n--------------------\n<b>{}</b>, to <b>{}</b> on <b>{}</b>{}",
+                departure_info, dep.name, dep.direction, time, delay
             );
 
             // Add direction to departure names for buttons
@@ -377,10 +417,11 @@ async fn receive_stop(
         bot.send_message(
             dialogue.chat_id(),
             format!(
-                "🚏 Infos for selected station: <b>{}</b>\n{}\n--------------------",
+                "🚏 Infos for selected station (+ mins delay): <b>{}</b>\n{}\n--------------------",
                 stop, departure_info
             ),
-        ).parse_mode(Html)
+        )
+        .parse_mode(Html)
         .await?;
 
         // Send buttons for the transit departures
@@ -401,28 +442,82 @@ async fn receive_stop(
     Ok(())
 }
 
-
 async fn receive_transit(
     bot: Bot,
     dialogue: MyDialogue,
-    (_city, _addr, _stations, stop, stop_id): (String, String, Vec<Station>, String, String),
+    (city, addr, stations, stop, stop_id): (String, String, Vec<Station>, String, String),
+    q: CallbackQuery,
+) -> HandlerResult {
+    if let Some(transit) = &q.data {
+        let kb = make_inline_keyboard(vec!["1", "2", "3"], 3);
+
+        // Delete last update message
+        bot.delete_message(dialogue.chat_id(), q.message.unwrap().id)
+            .await?;
+
+        // Send buttons for the timer update rate
+        bot.send_message(
+            dialogue.chat_id(),
+            "Select how many <b>minutes</b> between each update:",
+        )
+        .parse_mode(Html)
+        .reply_markup(kb)
+        .await?;
+
+        dialogue
+            .update(State::ReceiveMinutes {
+                city,
+                addr,
+                stations,
+                stop,
+                stop_id,
+                transit: transit.to_owned(),
+            })
+            .await?;
+    }
+    Ok(())
+}
+
+async fn receive_minutes(
+    bot: Bot,
+    dialogue: MyDialogue,
+    (_city, _addr, _stations, stop, stop_id, transit): (
+        String,
+        String,
+        Vec<Station>,
+        String,
+        String,
+        String,
+    ),
     q: CallbackQuery,
     tasks: MyTasksMap,
 ) -> HandlerResult {
-    if let Some(transit) = &q.data {
+    if let Some(update_time) = &q.data {
         let dial = dialogue.clone();
         // Time between each tracking update
-        let update_time = 1;
+        let mut update_time = update_time.parse::<i64>().unwrap();
         let msg = q.message.clone().unwrap();
         let mut msg_clone = msg.clone();
+        let mut curr_loc_msg: Option<Message> = None;
         let mut loc_msg: Option<Message> = None;
-
         let transit_clone = transit.clone();
 
-        let mut time_now = msg_clone.date.clone() - Duration::minutes(update_time);
-        let mut interval_timer = tokio::time::interval(Duration::minutes(update_time).to_std().unwrap());
+        bot.send_message(
+            dialogue.chat_id(),
+            format!(
+                "The timer is going to update every <b>{}</b> minute(s)!",
+                update_time
+            ),
+        )
+        .parse_mode(Html)
+        .await?;
 
-        let task: JoinHandle<HandlerResult> = tokio::spawn( async move {
+        let mut time_now = msg_clone.date.clone() - Duration::minutes(update_time);
+        let mut interval_timer =
+            tokio::time::interval(Duration::minutes(update_time).to_std().unwrap());
+
+        // Spawn task for repeated updates
+        let task: JoinHandle<HandlerResult> = tokio::spawn(async move {
             loop {
                 interval_timer.tick().await;
                 // Add the difference to the time that passed since timer's tick
@@ -436,16 +531,15 @@ async fn receive_transit(
                     // Extract name and direction from button to compare transit departures
                     let first_parent = transit_clone.find("(").unwrap();
                     let last_parent = transit_clone.len();
-                    let direction = transit_clone[first_parent+1..last_parent-1].to_string();
-                    let transit_name = transit_clone[0..first_parent-1].to_string();
+                    let direction = transit_clone[first_parent + 1..last_parent - 1].to_string();
+                    let transit_name = transit_clone[0..first_parent - 1].to_string();
 
                     &x.name == &transit_name && &x.direction == &direction
                 }) {
                     Some(d) => d,
-                    None => {break}
-
+                    None => break,
                 };
-                
+
                 // Parse planned departure time
                 let mut dep_time = DateTime::parse_from_rfc3339(&dep.planned).unwrap();
 
@@ -455,7 +549,16 @@ async fn receive_transit(
                 }
                 // Calculate duration till departure
                 let dur = dep_time.signed_duration_since(time_now);
-                
+
+                // When below update time, update interval timer to the duration time
+                if update_time != 1 && dur.num_minutes() > 0 && dur.num_minutes() < update_time {
+                    update_time = dur.num_minutes();
+                    interval_timer =
+                        tokio::time::interval(Duration::minutes(update_time).to_std().unwrap());
+                    // Tick the first time which is instant
+                    interval_timer.tick().await;
+                }
+
                 // Stop if transit already departured
                 if time_now > dep_time {
                     break;
@@ -464,47 +567,78 @@ async fn receive_transit(
                 let kb = make_inline_keyboard(vec!["<< Cancel"], 1);
 
                 // Delete last message including the msg of the update coming from the previous iteration
-                bot.delete_message(dial.chat_id(), msg_clone.id)
-                    .await?;
+                bot.delete_message(dial.chat_id(), msg_clone.id).await?;
 
-                // Delete location message if it exists
+                // Delete location messages if it exists
+                if let Some(m) = &curr_loc_msg {
+                    bot.delete_message(dial.chat_id(), m.id).await?;
+                }
                 if let Some(m) = &loc_msg {
-                    bot.delete_message(dial.chat_id(), m.id)
-                    .await?;
+                    bot.delete_message(dial.chat_id(), m.id).await?;
                 }
 
                 // Send location of transit if current position information is provided
                 if let Some(pos) = &dep.curr_position {
                     // unwrap() since Location.lat is a string that contains always a number
-                    loc_msg = Some(bot.send_location(dial.chat_id(), pos.lat.parse::<f64>().unwrap(), pos.lon.parse::<f64>().unwrap())
-                        .await?);
+                    curr_loc_msg = Some(
+                        bot.send_message(dial.chat_id(), "Current position of the transit:")
+                            .await?,
+                    );
+                    loc_msg = Some(
+                        bot.send_location(
+                            dial.chat_id(),
+                            pos.lat.parse::<f64>().unwrap(),
+                            pos.lon.parse::<f64>().unwrap(),
+                        )
+                        .await?,
+                    );
                 }
 
                 if dur.num_minutes() == 0 {
-                    msg_clone = bot.send_message(dial.chat_id(), 
-                        format!("🔔 Your transit: <b>{}</b> 🚌 should arrive now!", &transit_clone)
-                    )
-                    .parse_mode(Html)
-                    .reply_markup(kb.clone())
-                    .await?;
+                    // Update timer when duration below 1 minute
+                    update_time = 1;
+                    interval_timer =
+                        tokio::time::interval(Duration::minutes(update_time).to_std().unwrap());
+                    interval_timer.tick().await;
+
+                    msg_clone = bot
+                        .send_message(
+                            dial.chat_id(),
+                            format!(
+                                "🔔 Your transit: <b>{}</b> 🚌 should arrive now!",
+                                &transit_clone
+                            ),
+                        )
+                        .parse_mode(Html)
+                        .reply_markup(kb.clone())
+                        .await?;
                 } else {
-                    msg_clone = bot.send_message(dial.chat_id(), 
-                        format!("🔔 Your transit: <b>{}</b> 🚌 arrives in <b>{}</b> minutes ⌛!", &transit_clone, dur.num_minutes())
-                    )
-                    .parse_mode(Html)
-                    .reply_markup(kb)
-                    .await?;
+                    msg_clone = bot
+                        .send_message(
+                            dial.chat_id(),
+                            format!(
+                                "🔔 Your transit: <b>{}</b> 🚌 arrives in <b>{}</b> minutes ⌛!",
+                                &transit_clone,
+                                dur.num_minutes()
+                            ),
+                        )
+                        .parse_mode(Html)
+                        .reply_markup(kb)
+                        .await?;
                 }
             }
 
             // Delete last update message
-            bot.delete_message(dial.chat_id(), msg_clone.id)
-                .await?;
-            
+            bot.delete_message(dial.chat_id(), msg_clone.id).await?;
+
             bot.send_message(
                 dial.chat_id(),
-                format!("🔔 Your transit: <b>{}</b> 🚌 is departuring from <b>{}</b>!", transit_clone, stop),
-            ).parse_mode(Html)
+                format!(
+                    "🔔 Your transit: <b>{}</b> 🚌 is departuring from <b>{}</b>!",
+                    transit_clone, stop
+                ),
+            )
+            .parse_mode(Html)
             .await?;
 
             dial.exit().await?;
@@ -519,9 +653,7 @@ async fn receive_transit(
             t.insert(user, task);
         }
 
-        dialogue
-            .update(State::ReceiveCancel)
-            .await?;
+        dialogue.update(State::ReceiveCancel).await?;
     }
     Ok(())
 }
@@ -530,7 +662,7 @@ async fn receive_cancel(
     bot: Bot,
     dialogue: MyDialogue,
     q: CallbackQuery,
-    tasks: MyTasksMap
+    tasks: MyTasksMap,
 ) -> HandlerResult {
     let user = q.from.id.to_string();
     {
@@ -545,20 +677,21 @@ async fn receive_cancel(
         .reply_markup(null_kb)
         .await?;
 
-    bot.send_message(dialogue.chat_id(), "🚫 Cancelled! You can start over using /start!")
+    bot.send_message(
+        dialogue.chat_id(),
+        "🚫 Cancelled! You can start over using /start!",
+    )
     .await?;
     dialogue.exit().await?;
     Ok(())
 }
 
-fn get_user_id(msg: &Message) -> String{
+fn get_user_id(msg: &Message) -> String {
     let user_id = match &msg.kind {
-        MessageKind::Common(MessageCommon {
-             from, ..
-            }) => {Some(from.as_ref().unwrap().id)}
-        _ => {None}
+        MessageKind::Common(MessageCommon { from, .. }) => Some(from.as_ref().unwrap().id),
+        _ => None,
     };
-    
+
     let UserId(id_num) = user_id.unwrap();
     id_num.to_string()
 }
@@ -583,15 +716,13 @@ fn make_inline_keyboard(list: Vec<&str>, chunks: usize) -> InlineKeyboardMarkup 
 }
 
 /// Creates a keyboard made by buttons in a big column.
-fn _make_keyboard() -> KeyboardMarkup {
+fn _make_keyboard(list: Vec<&str>, chunks: usize) -> KeyboardMarkup {
     let mut keyboard: Vec<Vec<KeyboardButton>> = vec![];
 
-    let debian_versions = ["Zew", "Zew2", "Zew3", "/cancel"];
-
-    for versions in debian_versions.chunks(3) {
-        let row = versions
+    for values in list.chunks(chunks) {
+        let row = values
             .iter()
-            .map(|&version| KeyboardButton::new(format!("{}", version)))
+            .map(|&value| KeyboardButton::new(format!("{}", value)))
             .collect();
 
         keyboard.push(row);
@@ -600,15 +731,13 @@ fn _make_keyboard() -> KeyboardMarkup {
 }
 
 /// Creates a keyboard made by buttons in a big column.
-fn _make_reply_keyboard() -> ReplyMarkup {
+fn _make_reply_keyboard(list: Vec<&str>, chunks: usize) -> ReplyMarkup {
     let mut keyboard: Vec<Vec<KeyboardButton>> = vec![];
 
-    let debian_versions = ["Zew", "Zew2", "Zew3", "/cancel"];
-
-    for versions in debian_versions.chunks(3) {
-        let row = versions
+    for values in list.chunks(chunks) {
+        let row = values
             .iter()
-            .map(|&version| KeyboardButton::new(format!("{}", version)))
+            .map(|&value| KeyboardButton::new(format!("{}", value)))
             .collect();
 
         keyboard.push(row);
