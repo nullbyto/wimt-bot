@@ -1,13 +1,13 @@
 use std::fs;
 
-use crate::config::*;
 use crate::*;
 
 //////////////////////////////////////////////////////////
 // I/O
 //////////////////////////////////////////////////////////
 pub fn store_user_data(user: UserData) -> Result<(), Box<dyn Error + Sync + Send>> {
-    let path = Path::new(USER_DATA_PATH);
+    let user_data_path = std::env::var("USER_DATA_PATH").expect("USER_DATA_PATH must be set.");
+    let path = Path::new(&user_data_path);
 
     let file_data = match fs::read_to_string(path) {
         Ok(f) => f,
@@ -35,7 +35,9 @@ pub fn store_user_data(user: UserData) -> Result<(), Box<dyn Error + Sync + Send
 }
 
 pub fn get_user_data(user_id: String) -> Result<UserData, Box<dyn Error + Sync + Send>> {
-    let path = Path::new(USER_DATA_PATH);
+    let user_data_path = std::env::var("USER_DATA_PATH").expect("USER_DATA_PATH must be set.");
+    let path = Path::new(&user_data_path);
+
     let mut file_data = String::new();
     let mut file = match File::open(path) {
         Ok(f) => f,

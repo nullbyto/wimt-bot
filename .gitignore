@@ -2,5 +2,6 @@
 
 /backup
 
+.env
 *.sh
 *.json
