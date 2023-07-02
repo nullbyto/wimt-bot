@@ -6,7 +6,7 @@ departure and location of the transit in the map, with a timer function to notif
 ### Works only in Germany!! Since it uses a wrapper API around the Deutsche Bahn API https://v5.db.transport.rest
 
 <p align="center">
-    <img src="static/showcase.gif" width="200" height="" />
+    <img src="static/showcase.gif" width="225" height="" />
 </p>
 
 ## Features
